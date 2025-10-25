@@ -1,28 +1,70 @@
-from fastapi import APIRouter
-from pydantic import BaseModel
-from typing import List, Dict, Any
+# backend/api/routes_search.py
 
-from ml.embed_index import index  # <-- uses the singleton we create in embed_index.py
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
+
+from services.semantic_index import SemanticIndex
 
 router = APIRouter()
 
-class Query(BaseModel):
+
+class SearchRequest(BaseModel):
     q: str
-    k: int = 10
+    k: int = 5
 
 
-@router.post("/build")
-def build_index() -> Dict[str, Any]:
-    """
-    Rebuild FAISS index from Postgres reviews table.
-    """
-    index.build()
-    return {"status": "ok"}
+class SearchHit(BaseModel):
+    id: str
+    text: str
+    score: Optional[float] = None
+    domain: Optional[str] = None
+    product: Optional[str] = None
+    date: Optional[str] = None
 
 
-@router.post("/")
-def search(q: Query) -> List[Dict[str, Any]]:
-    """
-    Semantic search against the FAISS index.
-    """
-    return index.search(q.q, q.k)
+class SearchResponse(BaseModel):
+    results: List[SearchHit]
+
+
+# create shared index instance
+index = SemanticIndex()
+
+
+def _do_search(req: SearchRequest) -> SearchResponse:
+    q = req.q.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="Empty query")
+
+    try:
+        hits = index.search(q, req.k)
+    except RuntimeError as e:
+        # index not built or empty
+        raise HTTPException(status_code=500, detail=str(e))
+
+    cleaned: List[SearchHit] = []
+    for h in hits:
+        cleaned.append(
+            SearchHit(
+                id=str(h.get("id", "")),
+                text=h.get("text", ""),
+                score=h.get("score"),
+                domain=h.get("domain"),
+                product=h.get("product"),
+                date=h.get("date"),
+            )
+        )
+
+    return SearchResponse(results=cleaned)
+
+
+@router.post("/", response_model=SearchResponse)
+def search_root(req: SearchRequest):
+    # backwards compat for POST /
+    return _do_search(req)
+
+
+@router.post("/search", response_model=SearchResponse)
+def search_route(req: SearchRequest):
+    # main endpoint (what Next.js calls via /api/search)
+    return _do_search(req)

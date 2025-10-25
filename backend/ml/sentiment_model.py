@@ -1,117 +1,138 @@
-# ml/sentiment_model.py
-from typing import Dict, Any, List
-import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-import spacy
+# backend/ml/sentiment_model.py
+from typing import Dict
+import os
 
-_MODEL_NAME = "distilbert-base-uncased-finetuned-sst-2-english"
+# Try to load a HF sentiment pipeline, but don't die if offline
+# or model can't load. We'll gracefully degrade.
+_hf_pipeline = None
+_hf_loaded = False
 
-class SentimentAspectModel:
-    def __init__(self):
-        # load tiny CPU-friendly HF model
-        self.tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
-        self.model = AutoModelForSequenceClassification.from_pretrained(_MODEL_NAME)
-        self.model.eval()
-
-        # load spaCy noun chunker
-        # make sure container runs:
-        #   python -m spacy download en_core_web_sm
-        self.nlp = spacy.load("en_core_web_sm")
-
-        # distilbert sst2: 0 = NEGATIVE, 1 = POSITIVE
-        self.id2label = {0: "negative", 1: "positive"}
-
-    def _classify_text(self, text: str) -> Dict[str, Any]:
-        """
-        Return {'sentiment': 'positive'|'negative', 'score': confidence 0..1}
-        """
-        enc = self.tokenizer(
-            text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=256,
-            padding=False,
+def _maybe_load_hf():
+    global _hf_pipeline, _hf_loaded
+    if _hf_loaded:
+        return
+    _hf_loaded = True
+    try:
+        from transformers import pipeline
+        model_name = os.getenv(
+            "SENTIMENT_MODEL",
+            "distilbert-base-uncased-finetuned-sst-2-english",
         )
+        _hf_pipeline = pipeline("sentiment-analysis", model=model_name)
+    except Exception:
+        _hf_pipeline = None  # fallback only
 
-        with torch.no_grad():
-            out = self.model(**enc)
-            logits = out.logits  # [1,2]
-            probs = F.softmax(logits, dim=-1)[0]  # [2]
 
-        best_id = int(torch.argmax(probs).item())
-        best_label = self.id2label[best_id]
-        best_score = float(probs[best_id].item())
+POS_WORDS = {
+    "great", "amazing", "love", "fantastic", "excellent",
+    "sharp", "perfect", "helped", "relief", "working"
+}
+NEG_WORDS = {
+    "garbage", "slow", "overheats", "buzzes", "nauseous",
+    "terrible", "bad", "hot", "hurt", "pain", "ache",
+    "headache", "dizzy"
+}
 
-        return {
-            "sentiment": best_label,
-            "score": best_score,
-        }
+def _fallback_sentiment(text: str) -> Dict[str, float]:
+    """
+    Heuristic sentiment if HF pipeline not available.
+    We'll just count word hits.
+    """
+    score = 0.0
+    toks = text.lower().split()
+    for t in toks:
+        tclean = t.strip(",.!?;:")
+        if tclean in POS_WORDS:
+            score += 1.0
+        if tclean in NEG_WORDS:
+            score -= 1.0
 
-    def _extract_aspects(self, text: str) -> List[str]:
-        """
-        Heuristic aspect candidates by noun chunks.
-        e.g. "battery life", "the charging", "the speaker"
-        We'll lowercase + dedupe.
-        """
-        doc = self.nlp(text)
-        out: List[str] = []
-        for chunk in doc.noun_chunks:
-            cand = chunk.text.strip(" ,.!?;:\"'()[]").lower()
-            if len(cand) < 3:
-                continue
-            if cand in ("i","you","it","he","she","we","they"):
-                continue
-            if cand not in out:
-                out.append(cand)
-        return out
+    # clamp
+    if score > 3.0:
+        score = 3.0
+    if score < -3.0:
+        score = -3.0
 
-    def _score_aspect_in_context(self, aspect: str, full_text: str) -> Dict[str, Any]:
-        """
-        Zero/low-shot ABSA trick:
-        we feed model "Aspect: {aspect}. Opinion: {full_text}"
-        and classify sentiment.
-        """
-        conditioned = f"Aspect: {aspect}. Opinion: {full_text}"
-        res = self._classify_text(conditioned)
-        return {
-            "aspect": aspect,
-            "sentiment": res["sentiment"],
-            "score": res["score"],
-        }
+    # map to [0,1] confidence-ish
+    conf = min(abs(score) / 3.0, 1.0)
 
-    def predict(self, text: str) -> Dict[str, Any]:
-        """
-        This is what /model/predict returns via routes_model.py.
-        Shape MUST match what frontend is already using:
-        {
-          "sentiment": "...",
-          "score": float,
-          "aspects": [
-            {"aspect":"...","sentiment":"...","score":float},
-            ...
-          ]
-        }
-        """
-        overall = self._classify_text(text)
-        aspects_raw = self._extract_aspects(text)
+    label = "POSITIVE" if score > 0 else "NEGATIVE" if score < 0 else "NEUTRAL"
+    return {"label": label, "score": conf}
 
-        aspect_details: List[Dict[str, Any]] = []
-        for asp in aspects_raw:
-            aspect_details.append(self._score_aspect_in_context(asp, text))
 
-        # if the same aspect phrase repeats, keep highest-confidence
-        best_by_aspect: Dict[str, Dict[str, Any]] = {}
-        for a in aspect_details:
-            k = a["aspect"]
-            if (k not in best_by_aspect) or (a["score"] > best_by_aspect[k]["score"]):
-                best_by_aspect[k] = a
+def predict_sentiment(text: str) -> Dict[str, float]:
+    """
+    Unified interface that /metrics and /model/predict can call.
 
-        return {
-            "sentiment": overall["sentiment"],
-            "score": overall["score"],
-            "aspects": list(best_by_aspect.values()),
-        }
+    Returns dict like:
+      { "label": "POSITIVE", "score": 0.93 }
+    """
+    _maybe_load_hf()
 
-# singleton instance imported by routes_model.py
-sentiment_model = SentimentAspectModel()
+    # happy path HF pipeline
+    if _hf_pipeline is not None:
+        try:
+            result = _hf_pipeline(text)[0]
+            # HF result looks like { 'label': 'POSITIVE', 'score': 0.999 }
+            return {
+                "label": result["label"],
+                "score": float(result["score"]),
+            }
+        except Exception:
+            pass
+
+    # fallback
+    return _fallback_sentiment(text)
+
+
+def aspect_breakdown(text: str):
+    """
+    This powers ABSA in the UI (Explain page "Aspect Heatmap").
+    We'll do a trivial "extract aspects" + attach sentiment to each.
+
+    Output example:
+    [
+      {"aspect": "the camera", "sentiment": "positive", "score": 0.95},
+      {"aspect": "the speaker", "sentiment": "negative", "score": 0.87},
+    ]
+    """
+    aspects = []
+    lower = text.lower()
+
+    candidates = [
+        ("battery", "battery"),
+        ("charging", "charging"),
+        ("charge port", "charge port"),
+        ("overheats", "the phone overheats"),
+        ("speaker", "the speaker"),
+        ("camera", "the camera"),
+        ("nauseous", "the medicine / nausea"),
+        ("back pain", "my back pain"),
+    ]
+
+    for keyword, label in candidates:
+        if keyword in lower:
+            # sentiment = use predict_sentiment on that span
+            seg = label
+            sent = predict_sentiment(seg)
+            raw_label = sent["label"].lower()
+            if "pos" in raw_label:
+                sentiment_txt = "positive"
+            elif "neg" in raw_label:
+                sentiment_txt = "negative"
+            else:
+                sentiment_txt = "neutral"
+
+            aspects.append(
+                {
+                    "aspect": label,
+                    "sentiment": sentiment_txt,
+                    "score": float(sent["score"]),
+                }
+            )
+
+    # dedupe by aspect
+    dedup = {}
+    for a in aspects:
+        dedup[a["aspect"]] = a
+    return list(dedup.values())
