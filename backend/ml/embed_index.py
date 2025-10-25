@@ -1,56 +1,164 @@
-from sentence_transformers import SentenceTransformer
-import faiss, numpy as np, os, json
-from sqlalchemy import text
-from core.db import engine
-from core.config import settings
+import os
+import json
+from typing import List, Dict, Any
 
-INDEX_DIR = os.path.join(settings.data_dir, "faiss")
-os.makedirs(INDEX_DIR, exist_ok=True)
-INDEX_PATH = os.path.join(INDEX_DIR, "index_ip.bin")
-IDS_PATH = os.path.join(INDEX_DIR, "ids.npy")
+import numpy as np
+import faiss  # type: ignore
+from sentence_transformers import SentenceTransformer
+from sqlalchemy import create_engine, text
+
+# ---- config ----
+DB_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://cdri:cdri@postgres:5432/cdri",
+)
+INDEX_DIR = os.getenv("INDEX_DIR", "/data/index")
+EMB_MODEL = os.getenv("EMB_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+
 
 class EmbIndex:
-    def __init__(self, model="sentence-transformers/all-MiniLM-L6-v2"):
-        self.model = SentenceTransformer(model)
-        self.index = None
-        self.ids = []
+    """
+    - pull reviews from Postgres
+    - embed them with sentence-transformers
+    - build FAISS IP index
+    - serve semantic search
+    """
 
-    def build(self):
-        with engine.begin() as conn:
-            rows = [dict(x) for x in conn.execute(text("SELECT id,text FROM reviews"))]
+    def __init__(self):
+        self.engine = create_engine(DB_URL)
+        self.model = SentenceTransformer(EMB_MODEL)
+
+        os.makedirs(INDEX_DIR, exist_ok=True)
+        self.faiss_path = os.path.join(INDEX_DIR, "index.faiss")
+        self.meta_path = os.path.join(INDEX_DIR, "meta.json")
+
+        self.index = None  # faiss.IndexFlatIP
+        self.meta: List[Dict[str, Any]] = []
+
+    def build(self) -> None:
+        """
+        Build index from whatever is in the `reviews` table.
+        Writes both FAISS index + metadata file to disk.
+        """
+
+        # 1. fetch rows from DB
+        with self.engine.connect() as conn:
+            result = conn.execute(text("SELECT id, text FROM reviews"))
+            # SQLAlchemy 2.x returns Row objects; use ._mapping
+            rows = [dict(r._mapping) for r in result]
+
+        # no data case
         if not rows:
-            self.index = faiss.IndexFlatIP(384)
-            self.ids = []
+            self._save_empty()
             return
-        embs = self.model.encode([r["text"] for r in rows], convert_to_numpy=True, show_progress_bar=True)
-        d = embs.shape[1]
-        faiss.normalize_L2(embs)
-        self.index = faiss.IndexFlatIP(d)
-        self.index.add(embs)
-        self.ids = [r["id"] for r in rows]
-        faiss.write_index(self.index, INDEX_PATH)
-        np.save(IDS_PATH, np.array(self.ids))
 
-    def _ensure_loaded(self):
-        if self.index is None and os.path.exists(INDEX_PATH) and os.path.exists(IDS_PATH):
-            self.index = faiss.read_index(INDEX_PATH)
-            self.ids = np.load(IDS_PATH).tolist()
+        ids = [row["id"] for row in rows]
+        texts = [row["text"] for row in rows]
 
-    def query(self, q, k=10):
-        self._ensure_loaded()
-        if self.index is None or len(self.ids) == 0:
+        # 2. embed -> normalized float32
+        embeddings = self.model.encode(
+            texts,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        if embeddings.dtype != np.float32:
+            embeddings = embeddings.astype(np.float32)
+
+        # 3. build FAISS index (cosine == dot product because normalized)
+        dim = embeddings.shape[1]
+        faiss_index = faiss.IndexFlatIP(dim)
+        faiss_index.add(embeddings)
+
+        # 4. save index + metadata
+        faiss.write_index(faiss_index, self.faiss_path)
+
+        meta_list = []
+        for rid, txt in zip(ids, texts):
+            meta_list.append(
+                {
+                    "id": rid,
+                    "text": txt,
+                }
+            )
+
+        with open(self.meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta_list, f)
+
+        # keep in memory
+        self.index = faiss_index
+        self.meta = meta_list
+
+    def _save_empty(self) -> None:
+        """
+        If there are zero rows, create an empty index so healthcheck doesn't stay degraded.
+        """
+        dim = 384  # all-MiniLM-L6-v2 output size
+        faiss_index = faiss.IndexFlatIP(dim)
+
+        faiss.write_index(faiss_index, self.faiss_path)
+        with open(self.meta_path, "w", encoding="utf-8") as f:
+            json.dump([], f)
+
+        self.index = faiss_index
+        self.meta = []
+
+    def _load_from_disk(self) -> None:
+        """
+        Lazy-load FAISS + metadata into memory.
+        """
+        if not (os.path.exists(self.faiss_path) and os.path.exists(self.meta_path)):
+            self.index = None
+            self.meta = []
+            return
+
+        faiss_index = faiss.read_index(self.faiss_path)
+        with open(self.meta_path, "r", encoding="utf-8") as f:
+            meta_list = json.load(f)
+
+        self.index = faiss_index
+        self.meta = meta_list
+
+    def search(self, query: str, k: int = 10) -> List[Dict[str, Any]]:
+        """
+        Return top-k matches from FAISS.
+        Each hit: {rank, id, text, score}
+        """
+
+        # make sure index + meta are in memory
+        if self.index is None or not self.meta:
+            self._load_from_disk()
+
+        if self.index is None or not self.meta:
+            # still nothing indexed
             return []
-        v = self.model.encode([q], convert_to_numpy=True)
-        faiss.normalize_L2(v)
-        D,I = self.index.search(v, k)
-        out = []
-        with engine.begin() as conn:
-            for idx in I[0]:
-                if idx < 0 or idx >= len(self.ids): continue
-                rid = self.ids[idx]
-                row = conn.execute(text(
-                    "SELECT id,domain,product,text FROM reviews WHERE id=:i"),
-                    {"i": rid}
-                ).fetchone()
-                if row: out.append(dict(row))
+
+        q_emb = self.model.encode(
+            [query],
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        if q_emb.dtype != np.float32:
+            q_emb = q_emb.astype(np.float32)
+
+        scores, idxs = self.index.search(q_emb, k)
+        idxs = idxs[0]
+        scores = scores[0]
+
+        out: List[Dict[str, Any]] = []
+        for rank, (i, sc) in enumerate(zip(idxs, scores)):
+            if i < 0 or i >= len(self.meta):
+                continue
+            m = self.meta[i]
+            out.append(
+                {
+                    "rank": rank,
+                    "id": m["id"],
+                    "text": m["text"],
+                    "score": float(sc),
+                }
+            )
         return out
+
+
+# global singleton, this is what the routes import
+index = EmbIndex()

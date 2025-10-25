@@ -1,24 +1,28 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
-from ml.embed_index import EmbIndex
+from typing import List, Dict, Any
+
+from ml.embed_index import index  # <-- uses the singleton we create in embed_index.py
 
 router = APIRouter()
-index = EmbIndex()
-is_built = False
 
 class Query(BaseModel):
     q: str
     k: int = 10
 
+
 @router.post("/build")
-def build_index():
-    global is_built
+def build_index() -> Dict[str, Any]:
+    """
+    Rebuild FAISS index from Postgres reviews table.
+    """
     index.build()
-    is_built = True
-    return {"status":"built"}
+    return {"status": "ok"}
+
 
 @router.post("/")
-def search(q: Query):
-    if not is_built:
-        index.build()
-    return {"results": index.query(q.q, q.k)}
+def search(q: Query) -> List[Dict[str, Any]]:
+    """
+    Semantic search against the FAISS index.
+    """
+    return index.search(q.q, q.k)

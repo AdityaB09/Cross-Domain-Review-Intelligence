@@ -1,28 +1,19 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
-from ml.train_multilabel import train
-from ml.inference import Predictor
-from ml.absa_ner import ABSA
+from typing import Dict, Any
+
+from ml.sentiment_model import sentiment_model  # make sure name matches the file you just edited
 
 router = APIRouter()
-predictor: Predictor | None = None
-absa = ABSA()
 
 class TextIn(BaseModel):
     text: str
 
-@router.post("/train")
-def train_model():
-    r = train()
-    global predictor
-    predictor = Predictor()
-    return r
-
 @router.post("/predict")
-def predict(inp: TextIn):
-    global predictor
-    if predictor is None:
-      predictor = Predictor()
-    y = predictor.predict(inp.text)
-    y["aspects"] = absa.extract(inp.text)
-    return y
+def predict(inp: TextIn) -> Dict[str, Any]:
+    return sentiment_model.predict(inp.text)
+
+@router.post("/train")
+def train_model() -> Dict[str, Any]:
+    # stub: we won't do training live
+    return {"status": "not_implemented"}

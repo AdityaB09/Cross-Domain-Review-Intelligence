@@ -1,11 +1,16 @@
-import "./../styles/globals.css";
-import React from "react";
+import "./styles/globals.css";
+import type { ReactNode } from "react";
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export const metadata = {
+  title: "CDRI",
+  description: "Cross-Domain Review Intelligence",
+};
+
+export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html>
-      <body className="min-h-screen bg-gradient-to-b from-slate-900 to-slate-800 text-white">
-        <div className="max-w-6xl mx-auto p-6">{children}</div>
+    <html lang="en">
+      <body className="min-h-screen bg-gray-50 text-gray-900">
+        {children}
       </body>
     </html>
   );
