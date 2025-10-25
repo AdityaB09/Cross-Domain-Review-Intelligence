@@ -1,0 +1,35 @@
+# --- Data & Indexes ---
+# All raw/processed data should stay local or on S3, not in Git.
+data/*
+!data/.gitkeep           # empty placeholder so the folder exists
+!.gitignore              # keep this file
+
+# Optional: if you keep configs inside data/, allow small text configs
+!data/*.yaml
+!data/*.json
+
+# --- Python / Build Artifacts ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+
+# --- Docker / Compose ---
+*.env
+.env.*
+docker-compose.override.yml
+
+# --- ML / Experiments ---
+mlruns/
+checkpoints/
+runs/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# --- VSCode / IDE ---
+.vscode/
+.idea/
