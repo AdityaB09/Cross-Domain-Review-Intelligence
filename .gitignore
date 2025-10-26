@@ -33,3 +33,5 @@ runs/
 # --- VSCode / IDE ---
 .vscode/
 .idea/
+
+frontend/node_modules/*

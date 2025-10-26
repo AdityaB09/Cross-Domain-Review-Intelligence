@@ -1,36 +1,32 @@
-// frontend/src/app/api/metrics-overview/route.ts
+import { NextResponse } from "next/server";
 
-import { NextRequest, NextResponse } from "next/server";
+const BACKEND = process.env.BACKEND_URL || "http://backend:8080";
 
-// BACKEND URL inside docker compose network is `http://backend:8080`.
-// But when you're hitting from the browser via Next server route,
-// this code runs on the server side of the Next container so it CAN reach backend by service name.
-const BACKEND = process.env.BACKEND_ORIGIN || "http://backend:8080";
-
-export async function GET(req: NextRequest) {
-  const url = `${BACKEND}/metrics/overview`;
+// proxy to backend /model/predict
+export async function POST(req: Request) {
+  const body = await req.json();
 
   try {
-    const r = await fetch(url, {
-      method: "GET",
+    const r = await fetch(`${BACKEND}/model/predict`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
-    const text = await r.text();
 
     if (!r.ok) {
       return NextResponse.json(
-        { error: `Backend error: ${text}` },
-        { status: r.status },
+        { error: `backend returned ${r.status}` },
+        { status: 500 }
       );
     }
 
-    return new NextResponse(text, {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+    const j = await r.json();
+    return NextResponse.json(j);
   } catch (err: any) {
+    console.error("predict proxy error:", err);
     return NextResponse.json(
-      { error: err.message || "fetch failed" },
-      { status: 500 },
+      { error: err.message || "unreachable" },
+      { status: 500 }
     );
   }
 }

@@ -1,47 +1,64 @@
-# backend/api/routes_explain.py
+# api/routes_explain.py
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List
 
-# We will import from services.explain if present,
-# otherwise fall back to ml.explain (your earlier stub file).
-try:
-    from services.explain import run_explanation
-except ImportError:
-    # fallback if you didn't move it yet
-    from ml.explain import run_explanation  # we'll define this below
+from services.explain_model import analyze_aspects, token_attributions
 
 router = APIRouter()
-
-class TokenAttrib(BaseModel):
-    token: str
-    attribution: float
-
-class ExplainResponse(BaseModel):
-    text: str
-    tokens: List[TokenAttrib]
 
 
 class ExplainRequest(BaseModel):
     text: str
 
 
-@router.post("/explain", response_model=ExplainResponse)
-def explain(req: ExplainRequest):
-    """
-    Returns token-level contribution scores for the given text.
-    This feeds the "Token attributions" section in the UI.
-    """
-    try:
-        tokens = run_explanation(req.text)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"explain failed: {e}")
+class AspectItem(BaseModel):
+    aspect: str
+    sentiment: float
+    confidence: float
 
-    # tokens should be list[dict{token, attribution}]
-    return ExplainResponse(
-        text=req.text,
-        tokens=[
-            TokenAttrib(token=t["token"], attribution=float(t["attribution"]))
-            for t in tokens
-        ],
-    )
+
+class TokenItem(BaseModel):
+    token: str
+    score: float
+
+
+class ExplainResponse(BaseModel):
+    aspects: List[AspectItem]
+    tokens: List[TokenItem]
+
+
+@router.post("/explain-request", response_model=ExplainResponse)
+def post_explain(req: ExplainRequest):
+    """
+    The frontend /explain page posts here with { text: "..." }.
+    We return:
+    {
+      "aspects":[{"aspect":"...","sentiment":0.8,"confidence":0.9},...],
+      "tokens":[{"token":"...","score":-0.7},...]
+    }
+    """
+
+    user_text = req.text.strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="Empty text")
+
+    aspects_raw = analyze_aspects(user_text)
+    toks_raw = token_attributions(user_text)
+
+    # convert to pydantic models
+    aspect_items = [
+        AspectItem(
+            aspect=a["aspect"],
+            sentiment=float(a["sentiment"]),
+            confidence=float(a["confidence"]),
+        )
+        for a in aspects_raw
+    ]
+
+    token_items = [
+        TokenItem(token=t["token"], score=float(t["score"])) for t in toks_raw
+    ]
+
+    return ExplainResponse(aspects=aspect_items, tokens=token_items)

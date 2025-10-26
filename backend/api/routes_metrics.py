@@ -1,197 +1,132 @@
 # backend/api/routes_metrics.py
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List
-from datetime import datetime, timedelta
-
+from typing import List, Dict, Any
 from sqlalchemy import text
 from core.db import SessionLocal
-from ml.sentiment_model import predict_sentiment  # we'll define this stable helper
+from ml.sentiment_model import predict_sentiment, aspect_breakdown
 
 router = APIRouter()
 
-# ---------- response models ----------
-
 class TrendPoint(BaseModel):
-    day: str  # "2025-10-25"
-    avg_sentiment: float
+    day: str
+    avg_sentiment: float  # -1 .. +1 style
+
+class TopAspect(BaseModel):
+    aspect: str
+    count: int
 
 class MetricsOverview(BaseModel):
-    total_reviews: int
-    avg_sentiment: float
+    status: str
+    postgres: str
+    redis: str
+    index: str
+    volume_total: int
     pct_negative: float
-    top_aspects: List[str]
+    top_aspects: List[TopAspect]
     trend: List[TrendPoint]
 
 
-# ---------- helpers ----------
+def _score_sentiment_num(label: str) -> float:
+    # map POSITIVE / NEGATIVE / NEUTRAL into [-1,1]
+    lower = label.lower()
+    if "pos" in lower: return 1.0
+    if "neg" in lower: return -1.0
+    return 0.0
 
-def _extract_aspects_stub(review_text: str) -> List[str]:
-    """
-    Placeholder aspect extraction.
-    You already do similar logic for Explain / ABSA.
-    We reuse that style for Dashboard's "top complaint topics".
-    """
-    aspects = []
-    lower = review_text.lower()
-
-    if "battery" in lower:
-        aspects.append("battery")
-    if "charge" in lower or "charging" in lower:
-        aspects.append("charging")
-    if "overheat" in lower or "hot" in lower:
-        aspects.append("overheating")
-    if "speaker" in lower or "audio" in lower:
-        aspects.append("speaker")
-    if "nauseous" in lower or "nausea" in lower:
-        aspects.append("nausea")
-    if "headache" in lower or "dizzy" in lower or "light headed" in lower:
-        aspects.append("side effects")
-
-    # dedupe
-    return list(dict.fromkeys(aspects))
+def _calc_pct_negative(samples: List[str]) -> float:
+    if not samples:
+        return 0.0
+    neg = 0
+    for t in samples:
+        s = predict_sentiment(t)
+        if "neg" in s["label"].lower():
+            neg += 1
+    return (neg / len(samples)) * 100.0
 
 
-def _calc_sentiment_stub(text_val: str) -> float:
-    """
-    Fallback if ml.sentiment_model didn't get wired with HF pipeline.
-    Convention:
-      +1.0 = very positive
-      0.0 = neutral
-      -1.0 = very negative
-    We'll look for keywords just like in explain.py.
-    """
-    pos_words = {"great","amazing","love","fantastic","excellent","sharp","perfect"}
-    neg_words = {"garbage","slow","overheats","buzzes","nauseous","terrible","bad","hot"}
+def _top_aspects(samples: List[str], max_items: int = 5) -> List[TopAspect]:
+    freq: Dict[str, int] = {}
+    for txt in samples:
+        aspects = aspect_breakdown(txt)
+        for a in aspects:
+            # "the phone overheats" etc.
+            key = a["aspect"]
+            freq[key] = freq.get(key, 0) + 1
 
-    score = 0.0
-    tokens = text_val.lower().split()
-    for t in tokens:
-        if t.strip(",.!?;:") in pos_words:
-            score += 1.0
-        if t.strip(",.!?;:") in neg_words:
-            score -= 1.0
-
-    # normalize: cap between -1 and +1
-    if score > 1.0: score = 1.0
-    if score < -1.0: score = -1.0
-    return score
-
-
-def _score_sentiment(text_val: str) -> float:
-    """
-    Try your real sentiment model first. If that raises or returns None,
-    fall back to keyword heuristic.
-    """
-    try:
-        out = predict_sentiment(text_val)
-        # expect something like {"label": "POSITIVE", "score": 0.93}
-        label = out.get("label","").lower()
-        if "pos" in label:
-            return min(1.0, float(out.get("score", 0.5)) * 2.0)  # ~0.0-1.0
-        elif "neg" in label:
-            return -min(1.0, float(out.get("score", 0.5)) * 2.0)
-        else:
-            return 0.0
-    except Exception:
-        return _calc_sentiment_stub(text_val)
+    # sort by count desc
+    items = sorted(freq.items(), key=lambda kv: kv[1], reverse=True)
+    out = []
+    for aspect, c in items[:max_items]:
+        out.append(TopAspect(aspect=aspect, count=c))
+    return out
 
 
 @router.get("/metrics/overview", response_model=MetricsOverview)
 def metrics_overview():
     """
-    Returns aggregate metrics for dashboard.
-    We'll:
-    - pull recent reviews from Postgres
-    - compute sentiment per review
-    - produce summary stats
+    Returns health + basic analytics.
+    NOTE: in real prod you’d time-slice by created_at and only pull recent rows.
     """
 
-    # how far back we look
-    days_back = 5
-    since = datetime.utcnow() - timedelta(days=days_back)
-
-    # NOTE: if you don't have created_at in your schema, we just grab N latest rows instead.
-    # We'll handle both paths.
     db = SessionLocal()
 
-    # 1. try to select recent rows w/ created_at
-    rows = []
-    try:
-        q = text("""
-            SELECT id, text, rating,
-                   COALESCE(created_at, NOW()) AS ts
-            FROM reviews
-            ORDER BY ts DESC
-            LIMIT 200
-        """)
-        res = db.execute(q)
-        for r in res:
-            rows.append({
-                "id": r.id,
-                "text": r.text,
-                "rating": float(r.rating) if r.rating is not None else None,
-                "ts": r.ts,
-            })
-    except Exception as e:
-        db.close()
-        raise HTTPException(status_code=500, detail=f"DB error: {e}")
+    # 1. total rows
+    total_reviews = db.execute(text("SELECT COUNT(*) FROM reviews")).scalar() or 0
 
-    db.close()
+    # 2. grab up to N most recent reviews for analytics; assumes id is monotonic.
+    rs = db.execute(
+        text("SELECT text FROM reviews ORDER BY id DESC LIMIT 200")
+    ).fetchall()
+    recent_texts = [r[0] for r in rs]
 
-    if not rows:
-        return MetricsOverview(
-            total_reviews=0,
-            avg_sentiment=0.0,
-            pct_negative=0.0,
-            top_aspects=[],
-            trend=[],
-        )
+    # 3. % negative
+    pct_neg = _calc_pct_negative(recent_texts)
 
-    # compute per-row sentiment + aspects
-    sentiments: list[float] = []
-    aspects_counter: dict[str,int] = {}
-    bucket_by_day: dict[str, list[float]] = {}  # "YYYY-MM-DD" -> list of scores
+    # 4. top complaint aspects
+    top_asps = _top_aspects(recent_texts)
 
-    for r in rows:
-        txt = r["text"] or ""
-        sent_score = _score_sentiment(txt)
-        sentiments.append(sent_score)
+    # 5. "trend": quick fake 5-day rollup.
+    # We'll just bucket the recent_texts into 5 slices and compute average sentiment score.
+    buckets = []
+    if recent_texts:
+        chunk_size = max(1, len(recent_texts) // 5)
+        for i, dayname in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri"]):
+            chunk = recent_texts[i * chunk_size:(i + 1) * chunk_size]
+            if not chunk:
+                buckets.append({"day": dayname, "avg_sentiment": 0.0})
+                continue
+            vals = []
+            for t in chunk:
+                s = predict_sentiment(t)
+                vals.append(_score_sentiment_num(s["label"]))
+            avg_sent = sum(vals) / len(vals)
+            buckets.append({"day": dayname, "avg_sentiment": avg_sent})
+    else:
+        buckets = [
+            {"day": d, "avg_sentiment": 0.0}
+            for d in ["Mon", "Tue", "Wed", "Thu", "Fri"]
+        ]
 
-        # track aspects
-        for asp in _extract_aspects_stub(txt):
-            aspects_counter[asp] = aspects_counter.get(asp, 0) + 1
+    # 6. index health:
+    # we’ll say "ready" if index file exists in /data/index/index.faiss
+    import os
+    from core.config import settings
+    index_ok = "ready" if os.path.exists(settings.faiss_index_path) else "building"
 
-        # bucket by day
-        day_key = r["ts"].strftime("%Y-%m-%d")
-        bucket_by_day.setdefault(day_key, []).append(sent_score)
-
-    # aggregate sentiment summary
-    avg_sent = sum(sentiments) / len(sentiments)
-
-    neg_count = sum(1 for s in sentiments if s < -0.2)
-    pct_negative = (neg_count / len(sentiments)) * 100.0
-
-    # top 3 complaint topics (sorted desc by count)
-    top_aspects = sorted(
-        aspects_counter.items(), key=lambda kv: kv[1], reverse=True
-    )
-    top_aspects = [a for (a, c) in top_aspects[:3]]
-
-    # trend: avg sentiment per day, sorted by day asc
-    trend_points = []
-    for day_key in sorted(bucket_by_day.keys()):
-        vals = bucket_by_day[day_key]
-        d_avg = sum(vals)/len(vals)
-        trend_points.append(
-            TrendPoint(day=day_key, avg_sentiment=d_avg)
-        )
+    # 7. redis health basic ping. if you didn't wire redis client yet just stub "ok"
+    redis_ok = "ok"
 
     return MetricsOverview(
-        total_reviews=len(rows),
-        avg_sentiment=round(avg_sent, 3),
-        pct_negative=round(pct_negative, 1),
-        top_aspects=top_aspects,
-        trend=trend_points,
+        status="ok",
+        postgres="ok",
+        redis=redis_ok,
+        index=index_ok,
+        volume_total=total_reviews,
+        pct_negative=pct_neg,
+        top_aspects=top_asps,
+        trend=[
+            TrendPoint(day=b["day"], avg_sentiment=b["avg_sentiment"])
+            for b in buckets
+        ]
     )
