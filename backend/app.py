@@ -27,3 +27,6 @@ app.include_router(model_router, prefix="/model")
 app.include_router(explain_router, prefix="")
 app.include_router(health_router, prefix="")
 app.include_router(metrics_router, prefix="")   # <-- NEW
+
+from api.routes_eda import router as eda_router
+app.include_router(eda_router)

@@ -1,138 +1,206 @@
-# backend/ml/sentiment_model.py
-from typing import Dict
-import os
+# ml/sentiment_model.py
 
-# Try to load a HF sentiment pipeline, but don't die if offline
-# or model can't load. We'll gracefully degrade.
+from typing import List, Dict, Any, Tuple, Optional
+import re
+
+########################################
+# 1. Sentiment model (overall sentiment + fallback heuristic)
+########################################
+
+# We try to load a transformer sentiment pipeline at import time.
+# If that fails (no internet / no weights), we fall back to a tiny heuristic.
+from transformers import pipeline
+
 _hf_pipeline = None
-_hf_loaded = False
-
-def _maybe_load_hf():
-    global _hf_pipeline, _hf_loaded
-    if _hf_loaded:
-        return
-    _hf_loaded = True
-    try:
-        from transformers import pipeline
-        model_name = os.getenv(
-            "SENTIMENT_MODEL",
-            "distilbert-base-uncased-finetuned-sst-2-english",
-        )
-        _hf_pipeline = pipeline("sentiment-analysis", model=model_name)
-    except Exception:
-        _hf_pipeline = None  # fallback only
+try:
+    _hf_pipeline = pipeline(
+        "sentiment-analysis",
+        model="distilbert-base-uncased-finetuned-sst-2-english",
+    )
+except Exception:
+    _hf_pipeline = None
 
 
-POS_WORDS = {
-    "great", "amazing", "love", "fantastic", "excellent",
-    "sharp", "perfect", "helped", "relief", "working"
+_POS_WORDS = {
+    "good", "great", "amazing", "love", "cool", "fast", "beautiful", "clear",
+    "gorgeous", "perfect", "awesome", "excellent", "works", "fine", "acceptable",
+    "insane", "super", "loved", "easy", "recommend", "best"
 }
-NEG_WORDS = {
-    "garbage", "slow", "overheats", "buzzes", "nauseous",
-    "terrible", "bad", "hot", "hurt", "pain", "ache",
-    "headache", "dizzy"
+_NEG_WORDS = {
+    "bad", "garbage", "trash", "hate", "awful", "horrible", "terrible", "broke",
+    "crap", "bleed", "nauseous", "dizzy", "pain", "disgusting", "overheats",
+    "hot", "unusable", "slow", "worst"
 }
 
-def _fallback_sentiment(text: str) -> Dict[str, float]:
+
+def _heuristic_sentiment(text: str) -> Dict[str, Any]:
     """
-    Heuristic sentiment if HF pipeline not available.
-    We'll just count word hits.
+    Simple fallback if HF sentiment model can't load.
+    Score = (#pos - #neg) / (total matches+1) -> map to label.
     """
-    score = 0.0
-    toks = text.lower().split()
-    for t in toks:
-        tclean = t.strip(",.!?;:")
-        if tclean in POS_WORDS:
-            score += 1.0
-        if tclean in NEG_WORDS:
-            score -= 1.0
+    toks = re.findall(r"\w+", text.lower())
+    pos_hits = sum(1 for t in toks if t in _POS_WORDS)
+    neg_hits = sum(1 for t in toks if t in _NEG_WORDS)
 
-    # clamp
-    if score > 3.0:
-        score = 3.0
-    if score < -3.0:
-        score = -3.0
+    raw = pos_hits - neg_hits
+    denom = (pos_hits + neg_hits) if (pos_hits + neg_hits) > 0 else 1
+    confidence = abs(raw) / denom
 
-    # map to [0,1] confidence-ish
-    conf = min(abs(score) / 3.0, 1.0)
+    if raw > 0:
+        label = "POSITIVE"
+    elif raw < 0:
+        label = "NEGATIVE"
+    else:
+        label = "NEUTRAL"
 
-    label = "POSITIVE" if score > 0 else "NEGATIVE" if score < 0 else "NEUTRAL"
-    return {"label": label, "score": conf}
+    return {"label": label, "score": float(min(1.0, max(0.0, confidence)))}
 
 
-def predict_sentiment(text: str) -> Dict[str, float]:
+def predict_sentiment(text: str) -> Dict[str, Any]:
     """
-    Unified interface that /metrics and /model/predict can call.
-
-    Returns dict like:
-      { "label": "POSITIVE", "score": 0.93 }
+    Public: returns {"label": "POSITIVE"/"NEGATIVE"/"NEUTRAL", "score": float}
+    Used by:
+    - /model/predict
+    - /metrics/overview
+    - explain_model.token_attributions()
+    - explain_model.analyze_aspects() fallback
     """
-    _maybe_load_hf()
+    cleaned = text.strip()
+    if not cleaned:
+        return {"label": "NEUTRAL", "score": 0.0}
 
-    # happy path HF pipeline
     if _hf_pipeline is not None:
         try:
-            result = _hf_pipeline(text)[0]
-            # HF result looks like { 'label': 'POSITIVE', 'score': 0.999 }
-            return {
-                "label": result["label"],
-                "score": float(result["score"]),
-            }
+            res = _hf_pipeline(cleaned)
+            # Usually looks like [{'label': 'POSITIVE', 'score': 0.998...}]
+            if isinstance(res, list) and len(res) > 0:
+                item = res[0]
+                label = item.get("label", "NEUTRAL")
+                score = float(item.get("score", 0.0))
+                # Normalize to POSITIVE / NEGATIVE / NEUTRAL
+                # HF SST-2 is binary, so if it's neither pos nor neg explicitly,
+                # treat as neutral
+                up = label.upper()
+                if "POS" in up:
+                    final_label = "POSITIVE"
+                elif "NEG" in up:
+                    final_label = "NEGATIVE"
+                else:
+                    final_label = "NEUTRAL"
+                return {"label": final_label, "score": score}
         except Exception:
+            # fall through to heuristic
             pass
 
-    # fallback
-    return _fallback_sentiment(text)
+    # fallback heuristic
+    return _heuristic_sentiment(cleaned)
 
 
-def aspect_breakdown(text: str):
+########################################
+# 2. ABSA via spaCy noun chunks + local sentiment window
+########################################
+
+import spacy
+from spacy.tokens import Span, Doc
+
+# Load spaCy English model once.
+# You must have this in requirements.txt:
+#   spacy
+#   en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
+#
+# and ensure Docker installs it.
+_nlp = spacy.load("en_core_web_sm")
+
+
+def _normalize_aspect_text(span: Span) -> str:
     """
-    This powers ABSA in the UI (Explain page "Aspect Heatmap").
-    We'll do a trivial "extract aspects" + attach sentiment to each.
+    Turn noun chunk into a nice label for display:
+    - lowercase
+    - strip punctuation
+    - collapse spaces
+    """
+    txt = span.text.strip().lower()
+    txt = re.sub(r"[^\w\s\-]+", "", txt)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
 
-    Output example:
+
+def _window_for_span(doc: Doc, span: Span, window_size: int = 6) -> str:
+    """
+    Build a sentiment context window around a noun chunk:
+    tokens [span.start-window_size : span.end+window_size]
+    """
+    start_i = max(span.start - window_size, 0)
+    end_i = min(span.end + window_size, len(doc))
+    window_tokens = [t.text for t in doc[start_i:end_i]]
+    return " ".join(window_tokens)
+
+
+def aspect_breakdown(text: str) -> List[Dict[str, Any]]:
+    """
+    Return a list of aspect dicts:
     [
-      {"aspect": "the camera", "sentiment": "positive", "score": 0.95},
-      {"aspect": "the speaker", "sentiment": "negative", "score": 0.87},
+      {
+        "aspect": "the speaker",
+        "sentiment": "negative" | "positive" | "neutral",
+        "score": 0.98,
+        "context": "the speaker is garbage and the phone overheats..."
+      },
+      ...
     ]
+
+    Steps:
+    1. Extract noun chunks with spaCy.
+    2. For each chunk, grab a local +/- 6-token context window.
+    3. Run predict_sentiment(context_window).
+    4. Deduplicate aspects, preferring the strongest polarity:
+       - negative > positive > neutral
+       - tie-breaker = higher confidence score.
     """
-    aspects = []
-    lower = text.lower()
+    if not text or not text.strip():
+        return []
 
-    candidates = [
-        ("battery", "battery"),
-        ("charging", "charging"),
-        ("charge port", "charge port"),
-        ("overheats", "the phone overheats"),
-        ("speaker", "the speaker"),
-        ("camera", "the camera"),
-        ("nauseous", "the medicine / nausea"),
-        ("back pain", "my back pain"),
-    ]
+    doc = _nlp(text)
 
-    for keyword, label in candidates:
-        if keyword in lower:
-            # sentiment = use predict_sentiment on that span
-            seg = label
-            sent = predict_sentiment(seg)
-            raw_label = sent["label"].lower()
-            if "pos" in raw_label:
-                sentiment_txt = "positive"
-            elif "neg" in raw_label:
-                sentiment_txt = "negative"
-            else:
-                sentiment_txt = "neutral"
+    candidates: List[Tuple[str, Dict[str, Any]]] = []
 
-            aspects.append(
-                {
-                    "aspect": label,
-                    "sentiment": sentiment_txt,
-                    "score": float(sent["score"]),
-                }
-            )
+    for chunk in doc.noun_chunks:
+        aspect_label = _normalize_aspect_text(chunk)
+        if not aspect_label:
+            continue
 
-    # dedupe by aspect
-    dedup = {}
-    for a in aspects:
-        dedup[a["aspect"]] = a
-    return list(dedup.values())
+        context_window = _window_for_span(doc, chunk, window_size=6)
+
+        sent_res = predict_sentiment(context_window)
+        polarity = sent_res["label"].lower()  # "positive"/"negative"/"neutral"
+        conf = float(sent_res["score"])
+
+        candidates.append((
+            aspect_label,
+            {
+                "aspect": aspect_label,
+                "sentiment": polarity,
+                "score": conf,
+                "context": context_window,
+            }
+        ))
+
+    # Deduplicate by aspect_label with priority: negative > positive > neutral.
+    best_for_aspect: Dict[str, Dict[str, Any]] = {}
+    priority = {"negative": 3, "positive": 2, "neutral": 1}
+
+    for aspect_label, info in candidates:
+        prev = best_for_aspect.get(aspect_label)
+        if prev is None:
+            best_for_aspect[aspect_label] = info
+        else:
+            prev_sent = prev["sentiment"]
+            new_sent = info["sentiment"]
+            if priority.get(new_sent, 0) > priority.get(prev_sent, 0):
+                best_for_aspect[aspect_label] = info
+            elif new_sent == prev_sent:
+                # tie: keep higher confidence
+                if info["score"] > prev["score"]:
+                    best_for_aspect[aspect_label] = info
+
+    return list(best_for_aspect.values())
