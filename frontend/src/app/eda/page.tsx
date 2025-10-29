@@ -7,11 +7,12 @@ import EDAChartPainPoints, {
 import EDAChartBubble, {
   BubbleDatum,
 } from "@/components/EDAChartBubble";
+import { backend } from "@/lib/backend";
 
 type AspectRow = {
   aspect: string;
   mentions: number;
-  avg_sentiment: number; // -1..1
+  avg_sentiment: number;
 };
 
 export default function EDAInsightsPage() {
@@ -24,15 +25,13 @@ export default function EDAInsightsPage() {
       setLoading(true);
       setErr(null);
       try {
-        const resp = await fetch("/api/eda/aspects", {
+        const resp = await fetch(backend("/eda/aspects"), {
           method: "GET",
         });
 
         if (!resp.ok) {
           const text = await resp.text();
-          setErr(
-            `Backend returned ${resp.status}. Details: ${text}`
-          );
+          setErr(`Backend ${resp.status}: ${text}`);
           setRows([]);
           setLoading(false);
           return;
@@ -49,11 +48,7 @@ export default function EDAInsightsPage() {
 
         setRows(cleaned);
       } catch (e: any) {
-        console.error("EDA fetch failed", e);
-        setErr(
-          "Network error calling /api/eda/aspects. " +
-            "Is backend reachable as http://backend:8080?"
-        );
+        setErr("Network error talking to backend");
         setRows([]);
       } finally {
         setLoading(false);
@@ -61,9 +56,6 @@ export default function EDAInsightsPage() {
     }
 
     load();
-    // optional auto-refresh every 10s if you want live dashboard:
-    // const id = setInterval(load, 10000);
-    // return () => clearInterval(id);
   }, []);
 
   function sentimentColor(v: number) {
@@ -80,7 +72,6 @@ export default function EDAInsightsPage() {
     return "mixed";
   }
 
-  // transform rows for charts
   const painPointsData: PainPointDatum[] = rows.map((r) => ({
     aspect: r.aspect,
     avg_sentiment: r.avg_sentiment,
@@ -117,21 +108,19 @@ export default function EDAInsightsPage() {
 
       {!loading && !err && rows.length === 0 && (
         <div className="text-neutral-500 text-sm text-center">
-          No aspect analytics yet. Run some /explain-request curl calls first.
+          No aspect analytics yet. Hit Explain a few times first.
         </div>
       )}
 
       {!loading && !err && rows.length > 0 && (
         <>
-          {/* charts grid */}
           <section className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
             <div className="rounded-xl border border-neutral-200 bg-white shadow-sm p-4 flex flex-col">
               <div className="text-sm font-semibold text-neutral-900 mb-1">
                 Top pain points
               </div>
               <div className="text-[11px] text-neutral-500 mb-4">
-                More negative sentiment (left / red) = bigger
-                problem. Sorted by anger.
+                More negative sentiment (left / red) = bigger problem.
               </div>
               <div className="flex-1 min-h-[300px]">
                 <EDAChartPainPoints data={painPointsData} />
@@ -143,8 +132,7 @@ export default function EDAInsightsPage() {
                 Impact map
               </div>
               <div className="text-[11px] text-neutral-500 mb-4">
-                Bubble size = how often it shows up. Right/down =
-                common & angry. Top/right = common & loved.
+                Bubble size = how often it shows up.
               </div>
               <div className="flex-1 min-h-[300px]">
                 <EDAChartBubble data={bubbleData} />
@@ -152,7 +140,6 @@ export default function EDAInsightsPage() {
             </div>
           </section>
 
-          {/* raw table */}
           <section className="overflow-hidden rounded-xl border border-neutral-200 shadow-sm bg-white">
             <div className="grid grid-cols-3 bg-neutral-50 text-neutral-600 text-[11px] font-medium uppercase tracking-wide border-b border-neutral-200">
               <div className="px-4 py-3 text-left">Aspect</div>

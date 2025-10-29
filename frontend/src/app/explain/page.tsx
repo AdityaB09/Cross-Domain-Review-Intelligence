@@ -1,126 +1,97 @@
 "use client";
 
-import ABSAHeatmap, { AspectItem } from "@/components/ABSAHeatmap";
+import React, { useState } from "react";
+import ABSAHeatmap from "@/components/ABSAHeatmap";
 import TokenAttributions from "@/components/TokenAttributions";
-import { useState } from "react";
+import { backend } from "@/lib/backend";
+
+type AspectInfo = {
+  aspect: string;
+  sentiment: number;
+  confidence: number;
+  polarity: string;
+};
+
+type TokenInfo = {
+  token: string;
+  score: number;
+};
 
 export default function ExplainPage() {
   const [text, setText] = useState(
     "The pill reduced my pain fast but made me dizzy and nauseous"
   );
-
-  // use the shared type now:
-  const [aspects, setAspects] = useState<AspectItem[]>([]);
-
-  const [tokens, setTokens] = useState<{ token: string; score: number }[]>([]);
   const [loading, setLoading] = useState(false);
+  const [aspects, setAspects] = useState<AspectInfo[]>([]);
+  const [tokens, setTokens] = useState<TokenInfo[]>([]);
+  const [err, setErr] = useState<string | null>(null);
 
   async function handleRun() {
+    setLoading(true);
+    setErr(null);
     try {
-      setLoading(true);
-
-      const resp = await fetch("/api/explain-request", {
+      const res = await fetch(backend("/explain-request"), {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text }),
-        headers: {
-          "Content-Type": "application/json",
-        },
       });
-
-      if (!resp.ok) {
-        console.error("Explain API error:", resp.statusText);
-        return;
+      if (!res.ok) {
+        setErr(`Backend ${res.status}`);
+        setAspects([]);
+        setTokens([]);
+      } else {
+        const data = await res.json();
+        setAspects(Array.isArray(data.aspects) ? data.aspects : []);
+        setTokens(Array.isArray(data.tokens) ? data.tokens : []);
       }
-
-      const data = await resp.json();
-
-      // assume backend returns { aspects: [...], tokens: [...] }
-      setAspects(
-        (data.aspects || []).map((a: any) => ({
-          aspect: a.aspect,
-          sentiment: a.sentiment,
-          confidence: a.confidence,
-          polarity: a.polarity, // might be undefined, that's okay now
-        }))
-      );
-
-      setTokens(data.tokens || []);
-      
-    } catch (err) {
-      console.error("Failed to run explain:", err);
+    } catch (e: any) {
+      setErr("Network error talking to backend");
+      setAspects([]);
+      setTokens([]);
     } finally {
       setLoading(false);
     }
   }
-  return (
-    <main className="max-w-5xl mx-auto px-4 py-8 space-y-8">
-      <header className="text-center space-y-2">
-        <h1 className="text-3xl font-semibold tracking-tight text-neutral-900">
-          Explainability &amp; ABSA
-        </h1>
-        <p className="text-neutral-600 text-sm leading-relaxed max-w-3xl mx-auto">
-          Extract aspects (battery, charging, camera…) and see sentiment per
-          aspect. Then inspect which specific words pushed the model positive or
-          negative.
-        </p>
-      </header>
 
-      {/* Input box + Run */}
+  return (
+    <main className="max-w-5xl mx-auto px-4 py-10 space-y-8">
+      <section>
+        <h1 className="text-3xl font-bold text-neutral-900">
+          Explainability & ABSA
+        </h1>
+        <p className="text-neutral-600 max-w-2xl">
+          Extract aspects (battery, charging, camera...) and see
+          sentiment per aspect. Then inspect which specific words
+          pushed the model positive or negative.
+        </p>
+      </section>
+
       <section className="space-y-4">
         <textarea
-          className="w-full border border-neutral-300 rounded-md p-4 text-[15px] leading-relaxed focus:outline-none focus:ring-2 focus:ring-black focus:border-black"
-          rows={4}
+          className="w-full border border-neutral-300 rounded-lg p-3 text-sm"
+          rows={3}
           value={text}
           onChange={(e) => setText(e.target.value)}
         />
-
         <button
           onClick={handleRun}
           disabled={loading}
-          className="inline-flex items-center rounded-md bg-black text-white px-4 py-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+          className="bg-black text-white text-sm font-medium rounded-lg px-4 py-2 disabled:opacity-50"
         >
           {loading ? "Running..." : "Run"}
         </button>
-      </section>
 
-      {/* Aspect Heatmap */}
-      <section className="border border-neutral-200 rounded-xl p-5 bg-white shadow-sm">
-        <h2 className="text-lg font-semibold text-neutral-900 mb-1">
-          Aspect Heatmap
-        </h2>
-        <p className="text-neutral-600 text-sm mb-4 max-w-2xl">
-          For each detected aspect (like “the speaker” or “my back pain”), we
-          estimate sentiment and confidence. Think of this as aspect-based
-          sentiment.
-        </p>
-
-        {aspects.length === 0 ? (
-          <p className="text-sm text-neutral-500">
-            No aspects detected yet. Paste a review and click Run.
-          </p>
-        ) : (
-          <ABSAHeatmap aspects={aspects} />
+        {err && (
+          <div className="text-sm text-red-600 whitespace-pre-wrap">
+            {err}
+          </div>
         )}
       </section>
 
-      {/* Token attributions */}
-      <section className="border border-neutral-200 rounded-xl p-5 bg-white shadow-sm">
-        <h2 className="text-lg font-semibold text-neutral-900 mb-1">
-          Token attributions
-        </h2>
-        <p className="text-neutral-600 text-sm mb-4 max-w-2xl">
-          These tokens most influenced the model. Red tokens pulled sentiment
-          negative, green pulled sentiment positive. The small number on each
-          token is its contribution strength.
-        </p>
+      <section className="grid gap-6">
+        <ABSAHeatmap aspects={aspects} />
 
-        {tokens.length === 0 ? (
-          <p className="text-sm text-neutral-500">
-            No attributions yet. Paste a review and click Run.
-          </p>
-        ) : (
-          <TokenAttributions tokens={tokens} />
-        )}
+        <TokenAttributions tokens={tokens} />
       </section>
     </main>
   );
