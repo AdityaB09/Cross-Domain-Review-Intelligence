@@ -7,7 +7,7 @@ import { NextRequest, NextResponse } from "next/server";
 // We'll make a unified "analyze" call here that hits both /model/predict and /explain (if available)
 // and falls back gracefully.
 
-const BACKEND_BASE = "http://backend:8080";
+const BACKEND_BASE = "https://cdri-backend.onrender.com";
 
 export async function POST(req: NextRequest) {
   try {

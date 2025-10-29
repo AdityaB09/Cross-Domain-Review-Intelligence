@@ -6,7 +6,7 @@ const nextConfig = {
       // Proxy all /api/* calls to FastAPI backend in docker-compose network
       {
         source: '/api/:path*',
-        destination: 'http://backend:8080/:path*',
+        destination: 'https://cdri-backend.onrender.com/:path*',
       },
     ];
   },

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-const BACKEND = process.env.BACKEND_URL || "http://backend:8080";
+const BACKEND = process.env.BACKEND_URL || "https://cdri-backend.onrender.com";
 
 // proxy to backend /model/predict
 export async function POST(req: Request) {
