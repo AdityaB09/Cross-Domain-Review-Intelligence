@@ -2,26 +2,27 @@
 import re
 from typing import List, Dict, Any
 from .state_store import GLOBAL_ASPECT_COUNTS, ASPECT_LOCK
+from core.db import db_upsert_aspect, db_insert_review
 
 POS_WORDS = {
-    "good", "great", "amazing", "awesome", "love", "fast",
-    "cool", "nice", "sharp", "clear", "beautiful", "gorgeous",
-    "lifesaver", "excellent", "solid", "decent", "impressive", "reliable"
+    "good","great","amazing","awesome","love","fast",
+    "cool","nice","sharp","clear","beautiful","gorgeous",
+    "lifesaver","excellent","solid","decent","impressive","reliable"
 }
 NEG_WORDS = {
-    "bad", "terrible", "garbage", "trash", "hate", "slow",
-    "overheats", "overheat", "hot", "distorts", "buzzes",
-    "crackles", "disgusting", "awful", "annoying", "headache",
-    "pain", "dizzy", "nauseous", "laggy", "lag", "drains", "drain"
+    "bad","terrible","garbage","trash","hate","slow",
+    "overheats","overheat","hot","distorts","buzzes",
+    "crackles","disgusting","awful","annoying","headache",
+    "pain","dizzy","nauseous","laggy","lag","drains","drain"
 }
 
 ASPECT_KEYWORDS = {
-    "speaker quality": ["speaker", "audio", "sound"],
-    "camera sharpness": ["camera", "photo", "picture", "image"],
-    "overheating": ["overheat", "overheats", "overheating", "hot", "heat", "heats"],
-    "battery life": ["battery", "charge", "charging", "drain", "drains", "battery life"],
-    "performance": ["slow", "lag", "laggy", "fast", "performance"],
-    "overall": ["overall", "experience", "product", "phone", "it", "this"]
+    "speaker quality": ["speaker","audio","sound"],
+    "camera sharpness": ["camera","photo","picture","image"],
+    "overheating": ["overheat","overheats","overheating","hot","heat","heats"],
+    "battery life": ["battery","charge","charging","drain","drains","battery life"],
+    "performance": ["slow","lag","laggy","fast","performance"],
+    "overall": ["overall","experience","product","phone","it","this"]
 }
 
 def _tokenize(text: str) -> List[str]:
@@ -40,10 +41,8 @@ def _sentiment_score(tokens: List[str]) -> float:
     if total == 0:
         return 0.0
     raw = (pos_hits - neg_hits) / total
-    if raw > 1.0:
-        raw = 1.0
-    if raw < -1.0:
-        raw = -1.0
+    if raw > 1.0: raw = 1.0
+    if raw < -1.0: raw = -1.0
     return raw
 
 def _detect_aspects(text: str) -> List[Dict[str, Any]]:
@@ -52,24 +51,24 @@ def _detect_aspects(text: str) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
 
     for aspect_label, kws in ASPECT_KEYWORDS.items():
-        hit_pos = []
+        hit_idx = []
         for i, tok in enumerate(low_toks):
             for kw in kws:
                 if kw in tok:
-                    hit_pos.append(i)
+                    hit_idx.append(i)
                     break
-        if not hit_pos:
+        if not hit_idx:
             continue
 
         scores = []
-        for p in hit_pos:
+        for p in hit_idx:
             start = max(0, p - 5)
             end = min(len(toks), p + 6)
             window = toks[start:end]
             s = _sentiment_score(window)
             scores.append(s)
 
-        avg_sent = sum(scores) / len(scores) if scores else 0.0
+        avg_sent = sum(scores)/len(scores) if scores else 0.0
         conf = min(1.0, abs(avg_sent) + 0.1)
         out.append({
             "aspect": aspect_label,
@@ -112,7 +111,7 @@ def _token_attributions(text: str) -> List[Dict[str, Any]]:
         pills.append({"token": t, "score": float(score)})
     return pills
 
-def _update_global_aspects(aspects: List[Dict[str, Any]]):
+def _update_memory_aspect_agg(aspects: List[Dict[str, Any]]):
     with ASPECT_LOCK:
         for a in aspects:
             asp = a["aspect"]
@@ -126,12 +125,26 @@ def _update_global_aspects(aspects: List[Dict[str, Any]]):
             else:
                 row["count"] += 1
                 row["total_sent"] += sent
+            # also try Neon upsert
+            db_upsert_aspect(asp, sent)
 
-def run_lightweight_explain(text: str) -> Dict[str, Any]:
-    aspects = _detect_aspects(text)
-    tokens = _token_attributions(text)
-    # side effect: update global agg for EDA
-    _update_global_aspects(aspects)
+def update_everything_with_text(review_text: str) -> Dict[str, Any]:
+    """
+    Process 1 review:
+    - run aspect extraction/sentiment
+    - generate token attributions
+    - update in-memory agg
+    - push stats + raw review to Neon if available
+    """
+    aspects = _detect_aspects(review_text)
+    tokens = _token_attributions(review_text)
+
+    # persist raw text if DB available
+    db_insert_review(review_text)
+
+    # update memory + Neon counts
+    _update_memory_aspect_agg(aspects)
+
     return {
         "aspects": aspects,
         "tokens": tokens,

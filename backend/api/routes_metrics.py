@@ -1,13 +1,10 @@
 # backend/api/routes_metrics.py
 from fastapi import APIRouter
+
 router = APIRouter()
 
 @router.get("/metrics-overview")
 def metrics_overview():
-    """
-    Returns fake health/status + rolling sentiment stub,
-    so Dashboard page works without DB / Prometheus.
-    """
     return {
         "status": "ok",
         "postgres": "ok",

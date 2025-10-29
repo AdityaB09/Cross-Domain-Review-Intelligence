@@ -12,17 +12,15 @@ from api.routes_metrics import router as metrics_router
 from api.routes_eda import router as eda_router
 
 app = FastAPI(
-    title="Cross-Domain Review Intelligence (Lite)",
-    version="0.1.0"
+    title="CDRI Hybrid (Render + Neon fallback)",
+    version="0.2.0"
 )
 
-raw_origins = getattr(settings, "allowed_origins", "*").strip()
+raw_origins = settings.allowed_origins.strip()
 if raw_origins == "*":
     allow_origins = ["*"]
 else:
-    allow_origins = [
-        o.strip() for o in raw_origins.split(",") if o.strip()
-    ]
+    allow_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,7 +30,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount all lightweight routers
+# mount everything
 app.include_router(health_router)
 app.include_router(explain_router)
 app.include_router(search_router)
@@ -42,4 +40,4 @@ app.include_router(eda_router)
 
 @app.get("/")
 def root():
-    return {"msg": "CDRI Lite up and running"}
+    return {"msg": "hybrid backend up"}
