@@ -15,7 +15,7 @@ def init_db_if_possible():
     if _db_ok:
         return
     try:
-        db_url = settings.database_url
+        db_url = settings.database_url 
     except AttributeError:
         db_url = None
 
