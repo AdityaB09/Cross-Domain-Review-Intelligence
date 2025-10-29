@@ -7,10 +7,10 @@ from core.db import init_db
 
 from api.routes_health import router as health_router
 from api.routes_explain import router as explain_router
-from api.routes_search import router as search_router
-from api.routes_ingest import router as ingest_router
-from api.routes_metrics import router as metrics_router
-# DO NOT import routes that pull torch / transformers here.
+# from api.routes_search import router as search_router
+# from api.routes_ingest import router as ingest_router
+# from api.routes_metrics import router as metrics_router
+# # DO NOT import routes that pull torch / transformers here.
 # e.g. routes_model, routes_eval, etc. Leave them out for Render.
 
 app = FastAPI(
