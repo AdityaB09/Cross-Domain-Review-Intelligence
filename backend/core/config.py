@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     allowed_origins: str = "*"
-
+    database_url = str | None = None
     class Config:
         env_file = ".env"
         extra = "ignore"
