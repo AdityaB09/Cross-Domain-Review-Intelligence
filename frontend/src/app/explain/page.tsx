@@ -1,98 +1,49 @@
+// frontend/src/app/explain/page.tsx
 "use client";
+import { useState } from "react";
 
-import React, { useState } from "react";
-import ABSAHeatmap from "@/components/ABSAHeatmap";
-import TokenAttributions from "@/components/TokenAttributions";
-import { backend } from "@/lib/backend";
-
-type AspectInfo = {
-  aspect: string;
-  sentiment: number;
-  confidence: number;
-  polarity: string;
-};
-
-type TokenInfo = {
-  token: string;
-  score: number;
-};
+type Aspect = { aspect: string; sentiment: number; confidence: number };
 
 export default function ExplainPage() {
-  const [text, setText] = useState(
-    "The pill reduced my pain fast but made me dizzy and nauseous"
-  );
+  const [text, setText] = useState("");
+  const [aspects, setAspects] = useState<Aspect[]>([]);
   const [loading, setLoading] = useState(false);
-  const [aspects, setAspects] = useState<AspectInfo[]>([]);
-  const [tokens, setTokens] = useState<TokenInfo[]>([]);
-  const [err, setErr] = useState<string | null>(null);
 
-  async function handleRun() {
+  async function run() {
     setLoading(true);
-    setErr(null);
-    try {
-      const res = await fetch(backend("/explain-request"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) {
-        setErr(`Backend ${res.status}`);
-        setAspects([]);
-        setTokens([]);
-      } else {
-        const data = await res.json();
-        setAspects(Array.isArray(data.aspects) ? data.aspects : []);
-        setTokens(Array.isArray(data.tokens) ? data.tokens : []);
-      }
-    } catch (e: any) {
-      setErr("Network error talking to backend");
-      setAspects([]);
-      setTokens([]);
-    } finally {
-      setLoading(false);
-    }
+    setAspects([]);
+    const r = await fetch("/api/explain-review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const data = await r.json();
+    setAspects(data.aspects ?? []);
+    setLoading(false);
   }
 
   return (
-    <main className="max-w-5xl mx-auto px-4 py-10 space-y-8">
-      <section>
-        <h1 className="text-3xl font-bold text-neutral-900">
-          Explainability & ABSA
-        </h1>
-        <p className="text-neutral-600 max-w-2xl">
-          Extract aspects (battery, charging, camera...) and see
-          sentiment per aspect. Then inspect which specific words
-          pushed the model positive or negative.
-        </p>
-      </section>
+    <div className="space-y-4">
+      <h1 className="text-2xl font-bold">Explain (ABSA)</h1>
+      <textarea className="w-full border rounded p-3" rows={4}
+        placeholder="The camera is amazing but the speaker crackles and it overheats"
+        value={text} onChange={e=>setText(e.target.value)} />
+      <button onClick={run} className="px-4 py-2 rounded bg-black text-white">
+        {loading ? "Explaining..." : "Explain"}
+      </button>
 
-      <section className="space-y-4">
-        <textarea
-          className="w-full border border-neutral-300 rounded-lg p-3 text-sm"
-          rows={3}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-        />
-        <button
-          onClick={handleRun}
-          disabled={loading}
-          className="bg-black text-white text-sm font-medium rounded-lg px-4 py-2 disabled:opacity-50"
-        >
-          {loading ? "Running..." : "Run"}
-        </button>
-
-        {err && (
-          <div className="text-sm text-red-600 whitespace-pre-wrap">
-            {err}
-          </div>
-        )}
-      </section>
-
-      <section className="grid gap-6">
-        <ABSAHeatmap aspects={aspects} />
-
-        <TokenAttributions tokens={tokens} />
-      </section>
-    </main>
+      {aspects.length > 0 && (
+        <div className="rounded border bg-white">
+          {aspects.map((a, i) => (
+            <div key={i} className="flex items-center justify-between px-4 py-2 border-b last:border-b-0">
+              <div className="font-medium">{a.aspect}</div>
+              <div className="text-sm">
+                {a.sentiment.toFixed(2)} ({a.sentiment > 0 ? "positive" : "negative"})
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

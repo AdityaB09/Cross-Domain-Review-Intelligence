@@ -1,3 +1,4 @@
+// frontend/src/app/layout.tsx
 import "./styles/globals.css";
 import type { ReactNode } from "react";
 
@@ -23,17 +24,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
               <a className="hover:text-black" href="/dashboard">Dashboard</a>
               <a className="hover:text-black" href="/search">Search</a>
               <a className="hover:text-black" href="/explain">Explain</a>
-              <a
-                href="/eda"
-  className="text-sm text-neutral-700 hover:text-black font-medium"
->
-  Insights
-</a>
-
+              <a className="hover:text-black" href="/eda">Insights</a>
             </nav>
           </div>
         </header>
-
         <main className="mx-auto max-w-7xl px-6 py-8">{children}</main>
       </body>
     </html>
